@@ -53,38 +53,35 @@ func main() {
 	// Initial status check
 	lastStatus = checkConnection(client)
 	statusChangeTime = time.Now()
-	displayStatus(lastStatus, success, failure, info, 0)
+	displayStatus(lastStatus, success, failure, info, 0, client)
 
 	// Main loop
 	for {
 		select {
 		case <-ticker.C:
 			currentStatus := checkConnection(client)
+			now := time.Now()
+			duration := now.Sub(statusChangeTime)
 
-			// Calculate time in current state
-			duration := time.Since(statusChangeTime)
-
-			// If status changed, update tracking
+			// Always update using actual elapsed time
 			if currentStatus != lastStatus {
 				if currentStatus {
-					// Connection restored
 					downtime += duration
 				} else {
-					// Connection lost
 					uptime += duration
 				}
-				statusChangeTime = time.Now()
+				statusChangeTime = now
 				lastStatus = currentStatus
 			} else {
-				// Update ongoing time
 				if currentStatus {
-					uptime += checkInterval
+					uptime += duration
 				} else {
-					downtime += checkInterval
+					downtime += duration
 				}
+				statusChangeTime = now
 			}
 
-			displayStatus(currentStatus, success, failure, info, duration)
+			displayStatus(currentStatus, success, failure, info, duration, client)
 
 		case <-sigChan:
 			// Clean up and exit
@@ -105,32 +102,37 @@ func checkConnection(client *http.Client) bool {
 	return resp.StatusCode >= 200 && resp.StatusCode < 300
 }
 
-func displayStatus(connected bool, success, failure, info *color.Color, duration time.Duration) {
-	// Move cursor to status line
+// displayStatus prints the current connection status, duration, and network latency if connected.
+func displayStatus(connected bool, success, failure, info *color.Color, duration time.Duration, client *http.Client) {
+	// Move cursor to status line (row 4, clear line)
 	fmt.Print("\033[4;0H\033[K")
 
+	// Get current time for status display
 	timeNow := time.Now().Format("15:04:05")
 
+	// Print connection status with color
 	if connected {
 		success.Printf("[%s] ✓ CONNECTED    ", timeNow)
 	} else {
 		failure.Printf("[%s] ✗ DISCONNECTED ", timeNow)
 	}
 
+	// Print duration of current state if available
 	if duration > 0 {
 		info.Printf("Duration: %s", formatDuration(duration))
 	}
 
-	// Extra network info when connected
+	// If connected, print network latency
 	if connected {
+		// Move cursor to row 6, clear line
 		fmt.Print("\033[6;0H\033[K")
 		fmt.Print("Network Latency: ")
 
-		// Sample latency measurement
+		// Measure latency by timing an HTTP GET request
 		start := time.Now()
-		client := &http.Client{Timeout: timeout}
-		_, err := client.Get(testURL)
+		resp, err := client.Get(testURL)
 		if err == nil {
+			resp.Body.Close()
 			latency := time.Since(start)
 			fmt.Printf("%s", latency.Round(time.Millisecond))
 		} else {
@@ -139,6 +141,7 @@ func displayStatus(connected bool, success, failure, info *color.Color, duration
 	}
 }
 
+// formatDuration returns a human-readable string for a time.Duration (e.g., 1h 2m 3s)
 func formatDuration(d time.Duration) string {
 	d = d.Round(time.Second)
 	h := d / time.Hour
