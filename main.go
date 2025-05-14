@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"net/http"
 	"os"
@@ -11,16 +12,23 @@ import (
 	"github.com/fatih/color"
 )
 
-const (
-	checkInterval = 2 * time.Second
-	testURL       = "https://www.google.com"
-	timeout       = 5 * time.Second
+var (
+	// Default values
+	defaultCheckInterval = 2 * time.Second
+	defaultTestURL       = "https://www.google.com"
+	defaultTimeout       = 5 * time.Second
 )
 
 func main() {
+	// Define command line flags
+	checkIntervalFlag := flag.Duration("interval", defaultCheckInterval, "Interval between connection checks (e.g. 2s, 1m)")
+	testURLFlag := flag.String("url", defaultTestURL, "URL to test connection against")
+	timeoutFlag := flag.Duration("timeout", defaultTimeout, "HTTP request timeout")
+	flag.Parse()
+
 	// Create HTTP client with timeout
 	client := &http.Client{
-		Timeout: timeout,
+		Timeout: *timeoutFlag,
 	}
 
 	// Setup signal catching for graceful exit
@@ -32,11 +40,12 @@ func main() {
 	defer fmt.Print("\033[?25h") // Show cursor when done
 
 	fmt.Println("Internet Connection Monitor")
+	fmt.Printf("Testing connection to: %s\n", *testURLFlag)
 	fmt.Println("Press Ctrl+C to exit")
 	fmt.Println("----------------------------")
 
 	// Create ticker for periodic checks
-	ticker := time.NewTicker(checkInterval)
+	ticker := time.NewTicker(*checkIntervalFlag)
 	defer ticker.Stop()
 
 	// Success and failure formatters
@@ -49,61 +58,92 @@ func main() {
 	var statusChangeTime time.Time
 	var downtime time.Duration
 	var uptime time.Duration
+	
+	// Latency statistics
+	var minLatency time.Duration = -1
+	var maxLatency time.Duration
+	var totalLatency time.Duration
+	var latencyCount int
 
 	// Initial status check
-	lastStatus = checkConnection(client)
+	var latency time.Duration
+	lastStatus, latency = checkConnection(client, *testURLFlag)
 	statusChangeTime = time.Now()
-	displayStatus(lastStatus, success, failure, info, 0, client)
+	
+	// Update latency stats if connected
+	if lastStatus && latency > 0 {
+		minLatency = latency
+		maxLatency = latency
+		totalLatency = latency
+		latencyCount = 1
+	}
+	
+	displayStatus(lastStatus, success, failure, info, 0, latency)
 
 	// Main loop
 	for {
 		select {
 		case <-ticker.C:
-			currentStatus := checkConnection(client)
+			currentStatus, latency := checkConnection(client, *testURLFlag)
 			now := time.Now()
 			duration := now.Sub(statusChangeTime)
 
-			// Always update using actual elapsed time
-			if currentStatus != lastStatus {
-				if currentStatus {
-					downtime += duration
-				} else {
-					uptime += duration
+			// Update uptime/downtime tracking - simplified logic
+			if currentStatus {
+				uptime += duration
+				
+				// Update latency statistics
+				if latency > 0 {
+					if minLatency < 0 || latency < minLatency {
+						minLatency = latency
+					}
+					if latency > maxLatency {
+						maxLatency = latency
+					}
+					totalLatency += latency
+					latencyCount++
 				}
-				statusChangeTime = now
-				lastStatus = currentStatus
 			} else {
-				if currentStatus {
-					uptime += duration
-				} else {
-					downtime += duration
-				}
-				statusChangeTime = now
+				downtime += duration
+			}
+			
+			// Update tracking variables
+			statusChangeTime = now
+			if currentStatus != lastStatus {
+				lastStatus = currentStatus
 			}
 
-			displayStatus(currentStatus, success, failure, info, duration, client)
+			displayStatus(currentStatus, success, failure, info, duration, latency)
 
 		case <-sigChan:
 			// Clean up and exit
 			fmt.Println("\n\nExiting Connection Monitor")
 			fmt.Printf("Total uptime: %s\n", formatDuration(uptime))
 			fmt.Printf("Total downtime: %s\n", formatDuration(downtime))
+			if latencyCount > 0 {
+				fmt.Printf("Min latency: %s\n", minLatency)
+				fmt.Printf("Max latency: %s\n", maxLatency)
+				fmt.Printf("Avg latency: %s\n", totalLatency/time.Duration(latencyCount))
+			}
 			return
 		}
 	}
 }
 
-func checkConnection(client *http.Client) bool {
-	resp, err := client.Get(testURL)
+// checkConnection tests the internet connection and returns connection status and latency
+func checkConnection(client *http.Client, url string) (bool, time.Duration) {
+	start := time.Now()
+	resp, err := client.Get(url)
 	if err != nil {
-		return false
+		return false, 0
 	}
 	defer resp.Body.Close()
-	return resp.StatusCode >= 200 && resp.StatusCode < 300
+	latency := time.Since(start)
+	return resp.StatusCode >= 200 && resp.StatusCode < 300, latency
 }
 
 // displayStatus prints the current connection status, duration, and network latency if connected.
-func displayStatus(connected bool, success, failure, info *color.Color, duration time.Duration, client *http.Client) {
+func displayStatus(connected bool, success, failure, info *color.Color, duration time.Duration, latency time.Duration) {
 	// Move cursor to status line (row 4, clear line)
 	fmt.Print("\033[4;0H\033[K")
 
@@ -128,16 +168,8 @@ func displayStatus(connected bool, success, failure, info *color.Color, duration
 		fmt.Print("\033[6;0H\033[K")
 		fmt.Print("Network Latency: ")
 
-		// Measure latency by timing an HTTP GET request
-		start := time.Now()
-		resp, err := client.Get(testURL)
-		if err == nil {
-			resp.Body.Close()
-			latency := time.Since(start)
-			fmt.Printf("%s", latency.Round(time.Millisecond))
-		} else {
-			fmt.Print("Unknown")
-		}
+		// Print measured latency
+		fmt.Printf("%s", latency.Round(time.Millisecond))
 	}
 }
 
